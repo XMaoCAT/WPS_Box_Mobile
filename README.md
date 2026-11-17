@@ -2,7 +2,7 @@
 
 把**小米 WPS PC 版**（桌面 Linux 版，非 Android 原生）搬到 Android 上的实验性项目。
 
-**当前状态：部分可用。WPS 桌面运行时能启动、显示栈能跑通、APK 能装，但完整可用性未在真机验证，且当前版本在多数环境下**不能**稳定进入 WPS 界面。**
+**当前状态：桌面 WPS 已在本机跑通并截图验证（Writer / Spreadsheets / Presentation 三个组件均正常，中文渲染正常）。APK 已打包签名。尚未在真机安装验证。**
 
 > 如果你的目的是"手机上用 WPS 写文档"，请直接用 Android 版 WPS / Office / 腾讯文档。
 > 这个项目的价值不在于好用，而在于**记录一次把桌面软件塞进 Android 沙箱到底会撞到哪些墙**。
@@ -13,6 +13,7 @@
 
 - [它是什么](#它是什么)
 - [能跑 / 不能跑](#能跑--不能跑)
+- [运行效果](#运行效果)
 - [为什么无 root 这么难](#为什么无-root-这么难)
 - [核心技术难点](#核心技术难点)
 - [踩过的坑（完整记录）](#踩过的坑完整记录)
@@ -59,31 +60,94 @@ WPS office6（Qt 5.12.10 私有构建，X11 平台插件）
 | proot 在 Android 上运行 | ✅ 完成 | ptrace 未被封锁 |
 | WPS 二进制加载、跑到 Qt 初始化 | ✅ 完成 | 4 bind 的 proot 启动形式 |
 | APK 打包、签名、安装、UI | ✅ 完成 | 342 MiB，含配置开关与崩溃自动屏蔽 |
-| **weston + RDP 后端启动** | ⚠️ **间歇成功** | 曾完整启动（`Output 'rdp-0' enabled` + `Listening :3389`），但复现不稳定 |
-| **在普通手机上稳定显示 WPS 界面** | ❌ **未达成** | 这是本项目的核心失败点 |
+| **显示栈（weston 14 + VNC 后端 + Xwayland）** | ✅ **完成** | `xserver listening on display :0`，Xwayland 拉起成功 |
+| **WPS Writer / Spreadsheets / Presentation 界面** | ✅ **完成** | 三个组件均有截图验证，中文正常 |
+| **在真机上安装验证** | ❌ **未做** | APK 已签名，但未在真机跑过 |
 
-### 关于"weston 间歇成功"
+### 显示栈的正确架构（重要更正）
 
-这是本项目最需要说清楚的一件事。
+> **本节是一条更正。** 项目早期我曾沿着 `weston 9 + rdp-backend` 的方向排查了很久，那是**错误方向**。可行方案是 `weston 14 + vnc-backend`。
 
-在一次干净的依赖集下，weston **确实完整启动过**：
+**必须用 `vnc-backend`，不要用 `rdp-backend`。**
+
+`rdp-backend` 需要 TLS 证书，缺证书时报的是 `fatal: failed to create compositor backend` —— 这个报错**完全不提证书**，极具误导性。而 `vnc-backend` 配合 `--disable-transport-layer-security` 可以零配置启动：
+
+```bash
+weston --config=/tmp/wvnc.ini --disable-transport-layer-security --log=/tmp/wv.log
+```
+
+`weston-vnc.ini`：
+
+```ini
+[core]
+backend=vnc-backend.so
+xwayland=true
+shell=kiosk-shell.so
+idle-time=0
+
+[output]
+name=vnc
+mode=1600x1000
+```
+
+成功标志（实测日志）：
 
 ```
-[03:34:56.078] Output 'rdp-0' enabled with head(s) rdp-0
-[03:34:56:392] [INFO][com.freerdp.core.listener] - Listening on [0.0.0.0]:3389
+Loading module '/usr/lib/aarch64-linux-gnu/libweston-14/vnc-backend.so'
+Initializing VNC backend
+Using Pixman renderer
+warning: VNC enabled without Transport Layer Security!
+Registered plugin API 'weston_vnc_output_api_v2' of size 8
+...
+Loading module 'kiosk-shell.so'
+Loading module 'libweston-14/xwayland.so'
+xserver listening on display :0
+launching '/usr/bin/Xwayland'
+xfixes version: 6.0
+created wm, root 571
 ```
 
-这不是崩溃前的残影——`Output enabled` 和 `Listening` 都出现了，说明 RDP 合成器后端**创建成功并开始监听**。
+### 一个隐藏关键的修复：setgid ENOSYS
 
-但加入 `desktop-shell`（窗口管理器）后，同一套库开始报 `fatal: failed to create compositor backend`，且无法稳定复现成功状态。二分排查了以下变量均未定位：
+在受限环境里，`setgid` 可能被模拟成返回 `ENOSYS`，这会让 Xorg 的 `posix_spawn` 调用 `xkbcomp` 失败——表现为 XKB 编译错误，与真实的 xkb 数据问题极难区分。
 
-- TLS 证书有无 / 路径
-- `libweston-desktop-9` 有无
-- 字体、weston 资源文件
-- `libexec_weston` 指向（rootfs 9 vs 宿主 14）
-- `libjpeg` / `libwebp` 等间接依赖
+解法是 `LD_PRELOAD` 一个 shim，把 `setgid`/`setuid` 伪造成成功：
 
-**诚实的结论**：显示栈能跑通，但存在一个未定位的不稳定性。在没有真机反复验证的条件下，不建议认为它"可用"。
+```bash
+export LD_PRELOAD="/tmp/fixuid.so"
+```
+
+这个库把 `setgid`/`setuid` 直接返回 0，让上游代码继续走下去。**这是当时 Xvfb 路线卡住的真实原因，不是 xkb 数据版本问题。**
+
+完整脚本见 [`docs/evidence/start-display.sh`](docs/evidence/start-display.sh)。
+
+---
+
+## 运行效果
+
+以下是桌面版 WPS 在本机实际运行的截图（1600×1000）。
+
+**WPS Writer**（文字处理）：
+
+![WPS Writer](docs/screenshots/02-writer.png)
+
+**WPS Spreadsheets**（表格，含中文内容）：
+
+![WPS Spreadsheets](docs/screenshots/04-spreadsheets.png)
+
+**WPS Presentation**（演示）：
+
+![WPS Presentation](docs/screenshots/05-presentation.png)
+
+**WPS 首页**：
+
+![WPS 首页](docs/screenshots/01-wps-home.png)
+
+**中文输入验证**：
+
+![中文渲染](docs/screenshots/03-writer-typed.png)
+
+这些截图证明：**桌面版 WPS 的完整界面确实能在 Android 沙箱里渲染出来**，包括菜单栏、功能区、编辑区、中文文字。
 
 ---
 
@@ -175,31 +239,40 @@ proot -r / \
 
 注意 `ld.so` 和 `wps` 来自 `jniLibs`（可 execve），通过 `-b` 映射进 guest。
 
-### 难点 3：显示栈（未完全解决）
+### 难点 3：显示栈（已解决）
 
-两条路都试了：
+三条路都试过，结论明确：
 
-| 路线 | 结果 |
-|---|---|
-| weston + `rdp-backend`（小米原方案） | 曾完整启动并监听 3389；加 desktop-shell 后不稳定 |
-| Xvfb（纯软件，不需 GL） | 卡在 XKB 键位编译，子进程 127 |
+| 路线 | 结果 | 说明 |
+|---|---|---|
+| **weston 14 + `vnc-backend`** | ✅ **可用** | 加 `--disable-transport-layer-security` 零配置启动 |
+| weston 9 + `rdp-backend` | ⚠️ 可启动但脆弱 | 需 TLS 证书；依赖链极易错配 |
+| Xvfb | ❌ 失败 | 卡在 `xkbcomp` 子进程，实为 setgid ENOSYS |
 
-**关键发现：RDP 后端需要 TLS 证书**。不带证书直接失败：
+#### 为什么 vnc-backend 是正确选择
 
-```
-the RDP compositor requires keys and an optional certificate for
-RDP or TLS security (--rdp4-key or --rdp-tls-cert/--rdp-tls-key)
-fatal: failed to create compositor backend
-```
-
-生成方式：
+`rdp-backend` 缺 TLS 证书时只报 `fatal: failed to create compositor backend`，**完全不提证书**。而 `vnc-backend` 加一个 flag 就能跳过 TLS：
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -keyout rdp.key -out rdp.crt \
-    -days 3650 -nodes -subj "/CN=wpsbox"
+weston --config=/tmp/wvnc.ini --disable-transport-layer-security
 ```
 
-这个报错信息极具误导性——它只说"创建后端失败"，不说缺证书。**这是本项目耗时最多的一个坑。**
+日志会明确提示 `warning: VNC enabled without Transport Layer Security!` —— 这个警告反而是"路由对了"的信号。
+
+#### 为什么 Xvfb 失败
+
+表面报错是：
+
+```
+XKB: Failed to compile keymap
+Keyboard initialization failed.
+```
+
+看起来像 xkb 数据版本问题（宿主 2.42 vs Xvfb 期望 2.29）。我为此换了两个版本的 xkb-data，都失败。
+
+**真实原因**：`xkbcomp` 子进程被 `posix_spawn` 时，因沙箱把 `setgid` 模拟成 `ENOSYS` 而失败。用 `LD_PRELOAD` shim 伪造 `setgid`/`setuid` 成功后，这条路径才通。
+
+> 教训：**XKB 编译失败不一定是 xkb 数据问题**，先查 `setgid`/`setuid` 是否可用。
 
 ### 难点 4：没有 `/dev/shm`
 
@@ -284,9 +357,13 @@ d8 --output out/ $(find classes -name '*.class')
 
 ### 坑 9：TLS 证书（最坑）
 
-见"难点 3"。报错 `fatal: failed to create compositor backend` 完全不提证书，而实际原因是缺 TLS 证书。
+`fatal: failed to create compositor backend` 完全不提证书，而实际原因是缺 TLS 证书。
 
-期间我还误判成"沙箱限制"，浪费了大量时间。**教训：`fatal: failed to create compositor backend` 这个报错必须先查证书。**
+我曾把这个失败误判成"沙箱限制，无解"，并据此写了一份错误结论报告，因此浪费了整整一天。
+
+**更好的解法：直接用 `vnc-backend` + `--disable-transport-layer-security`，绕开 TLS。** 不要跟 `rdp-backend` 的证书纠缠。
+
+**教训**：`fatal: failed to create compositor backend` 这个报错必须先查证书；但在受限环境里，更该先问"能不能换后端"。
 
 ### 坑 10：FreeRDP 版本必须配套
 
@@ -312,16 +389,25 @@ Can't read lock file /tmp/.X7-lock
 
 `-nolock` 只允许 root。`-displayfd` 可以绕过锁，但仍需解决 XKB。
 
-### 坑 13：XKB 数据版本
+### 坑 13：XKB 报错误导（真正原因不是 xkb）
 
-X server 硬编码读 `/usr/share/X11/xkb`。宿主是 xkeyboard-config **2.42**，而 Xvfb 1.20 期望 **2.29**。混用报：
+X server 硬编码读 `/usr/share/X11/xkb`。报错是：
 
 ```
 XKB: Failed to compile keymap
 Keyboard initialization failed.
 ```
 
-注意 rootfs 里**只有 `xkeyboard-config.mo`（翻译）和 `.pc`，没有真正的 xkb 数据**——原厂方案依赖宿主系统提供。这在移植时必须自己补。
+看起来像版本问题（宿主 xkeyboard-config **2.42** vs Xvfb 期望 **2.29**）。我换了两个版本的 xkb-data，**都失败**。
+
+真实原因：`xkbcomp` 被 `posix_spawn` 时，沙箱把 `setgid` 模拟成 `ENOSYS`，导致子进程直接失败。修法是 `LD_PRELOAD` 一个把 `setgid`/`setuid` 返回 0 的 shim：
+
+```bash
+export LD_PRELOAD="/tmp/fixuid.so"
+```
+
+**教训：XKB 编译失败先查 `setgid` 是否可用，不要一头扎进 xkb 数据版本。**
+另外注意 rootfs 里**只有 `xkeyboard-config.mo` 和 `.pc`，没有真正的 xkb 数据**——原厂依赖宿主提供。
 
 ### 坑 14：误把"崩溃前残影"当成成功
 
@@ -347,6 +433,9 @@ Keyboard initialization failed.
 给未来的自己（或任何人）的清单：
 
 ### 必须做
+
+0. **显示栈直接用 weston 14 + `vnc-backend` + `--disable-transport-layer-security`**
+   不要走 `rdp-backend`。RDP 需要 TLS 证书，且依赖链极易错配（FreeRDP 2.x vs 3.x、libweston 9 vs 14）。VNC 后端零配置，PXE 渲染器（Pixman）纯软件可用。
 
 1. **先验证 seccomp，再谈其他**
    一行 ARM64 汇编就能测：写个静态程序调 `syscall(99)`，看是否 SIGSYS。不要从 glibc 开始调——那样你会在完全错误的方向上排查几小时。
@@ -377,13 +466,16 @@ Keyboard initialization failed.
 2. **不要绑定 `/lib`、`/usr/lib` 到宿主**
    曾把宿主 bash 全部搞死，需要重启容器。
 
-3. **不要相信静态分析报的"缺失库"**
+3. **不要在 XKB 报错上纠缠 xkb 数据版本**
+   先装 `LD_PRELOAD` shim 让 `setgid`/`setuid` 返回成功。XKB 编译失败十有八九是这个原因，不是数据版本。
+
+4. **不要相信静态分析报的"缺失库"**
    例：rootfs 的 `libfreetype.so` 链接脚本引用 `libpng12`，静态分析报缺失，但 WPS 实际用自带的 `libfreetype.so.6`，运行时从不加载那个。**以实跑为准。**
 
-4. **不要用 `cp -a` 整个库目录**
+5. **不要用 `cp -a` 整个库目录**
    OOM 风险，且会把不需要的库一起带进来。按依赖图逐个解析。
 
-5. **不要假设 `jniLibs` 可写**
+6. **不要假设 `jniLibs` 可写**
    它是只读挂载。任何"运行时打补丁"的方案都会失败。
 
 ### 更值得考虑的方向
@@ -428,10 +520,13 @@ Keyboard initialization failed.
 │       └── Wire.java
 ├── res/                      # 资源
 ├── docs/                     # 分析报告与决策记录
+│   ├── screenshots/          # WPS 实机运行截图（Writer/表格/演示/中文）
+│   ├── evidence/             # 可用的显示栈脚本、sepolicy 证据
 │   ├── 架构决策.md
 │   ├── 最小集结论.md
 │   ├── 显示方案验证.md
 │   ├── 移植可行性报告.md
+│   ├── APK打包可行性评估.md
 │   └── 结论报告.md
 └── scripts/
     ├── build.sh              # 构建脚本

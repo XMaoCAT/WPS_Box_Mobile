@@ -1,0 +1,51 @@
+# 关键 sepolicy 证据（已逐字核实）
+
+## 1. private/app_neverallows.te (Android 14 / lineage-21)
+
+# Block calling execve() on files in an apps home directory.
+# This is a W^X violation (loading executable code from a writable
+# home directory). For compatibility, allow for targetApi <= 28.
+# b/112357170
+neverallow {
+  all_untrusted_apps
+  -untrusted_app_25
+  -untrusted_app_27
+  -runas_app
+} { app_data_file privapp_data_file }:file execute_no_trans;
+
+
+## 2. public/global_macros — x_file_perms 含 execute
+24:define(`x_file_perms', `{ getattr execute execute_no_trans map }')
+25-define(`r_file_perms', `{ getattr open read ioctl lock map watch watch_reads }')
+
+## 3. private/app.te:436-437 — 允许执行 apk_data_file
+allow appdomain apk_data_file:dir { open getattr read search ioctl lock };
+allow appdomain apk_data_file:file { getattr open read ioctl lock map x_file_perms };
+
+## 4. private/app.te:512-524 — 该 neverallow 显式排除 apk_data_file
+  radio
+  shared_relro
+  sdk_sandbox_all
+  system_app
+} {
+  data_file_type
+  -apex_art_data_file
+  -dalvikcache_data_file
+  -system_data_file # shared libs in apks
+  -apk_data_file
+}:file no_x_file_perms;
+
+# Don't allow apps access to any of the following character devices.
+
+## 5. Android 15 (lineage-22.1) 新增规则只针对 storage_area_content_file
+is_flag_enabled(RELEASE_UNLOCKED_STORAGE_API, `
+  # block apps from executing files in their storage areas
+  # this is a stronger and more desirable guarantee than blocking execute_no_trans, but
+  # execute cannot be blocked on all of app_data_file without causing
+  # backwards compatibility issues (see b/237289679)
+  neverallow appdomain storage_area_content_file:file execute;
+')
+
+
+## 6. private/file.te:213 — storage_area_content_file 是 app_data_file_type
+type storage_area_content_file, file_type, data_file_type, core_data_file_type, app_data_file_type;
