@@ -1,0 +1,29 @@
+# 构建产物
+build/
+*.apk
+*.apk.idsig
+verify/
+
+# payload（体积巨大，且是第三方商业软件，不入库）
+assets/payload.tar.gz
+assets/*.tar.gz
+jni/arm64-v8a/*.so
+jni/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 本地测试
+/tmp/
+*.log

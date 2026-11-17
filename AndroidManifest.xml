@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.wpsbox"
+    android:versionCode="2"
+    android:versionName="0.2">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+
+    <!-- arm64 only: the payload is aarch64 ELF. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- The payload runs locally; only an optional download needs the network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- extractNativeLibs MUST be true: it forces the package manager to
+         write lib*.so out as real files under /data/app/.../lib/arm64/,
+         which is the only location an unprivileged app may execve from.
+         Verified on device: exec there succeeds, while the same file in
+         the app's private directory fails with EACCES. -->
+    <application
+        android:label="WPS 桌面版"
+        android:extractNativeLibs="true"
+        android:largeHeap="true"
+        android:hardwareAccelerated="true"
+        android:hasCode="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ViewerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+    </application>
+</manifest>
